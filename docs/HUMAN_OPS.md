@@ -171,3 +171,15 @@ To redeploy elsewhere, just rsync these paths.
 | `llama-qwen38-q4.env`      | Qwen3.8-27B Q4_K_M (text only)     | 32K   | ≥24  | Lighter, faster, text-only            |
 
 Create a new preset by copying any of these and editing variables.
+
+---
+
+## Tested presets on this host (llmhost2, 58 GB RAM, no GPU)
+
+| Preset                | Status  | Notes                                           |
+| --------------------- | ------- | ----------------------------------------------- |
+| `llama-ornith-32k.env`| ✅ works | Loads in ~50 sec, 40 GB RAM used                |
+| `llama-qwen38-q4.env` | ✅ works | Loads in ~25 sec, 22 GB RAM used (faster)       |
+| `llama-ornith.env`    | ❌ OOM   | 512K ctx needs ≥256 GB RAM                      |
+
+Recommended default: `llama-ornith-32k.env` for capability, `llama-qwen38-q4.env` for speed.

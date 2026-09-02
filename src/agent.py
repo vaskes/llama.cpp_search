@@ -149,10 +149,13 @@ async def run_agent(args):
 
     messages = [
         {"role": "system", "content": (
-            "You are a helpful research assistant with web access via tools. "
-            "When you need information, call the appropriate tool — do not invent facts. "
-            "After gathering enough information, give a concise answer in the user's language. "
-            "If tools return empty results, say so honestly."
+            "You are a research assistant with web search and browser tools.\n\n"
+            "Rules:\n"
+            "1. For simple factual questions answer directly from your own knowledge.\n"
+            "2. Use search/fetch_url/browser_navigate ONLY when you need current/external information.\n"
+            "3. After AT MOST 2-3 tool calls, STOP calling tools and produce a final answer.\n"
+            "4. If a tool returns empty or fails, say so honestly - do not retry with the same approach.\n"
+            "5. Keep the final answer concise and in the user's language."
         )},
         {"role": "user", "content": prompt},
     ]
