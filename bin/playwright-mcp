@@ -1,0 +1,3 @@
+#!/bin/bash
+# Wrapper for @playwright/mcp using Node 20
+exec /opt/node20/bin/node /opt/search/node_modules/@playwright/mcp/cli.js "$@"

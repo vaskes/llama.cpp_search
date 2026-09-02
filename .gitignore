@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+.playwright-mcp/
+npm-debug.log
+
+# Logs
+logs/
+*.log
+last_answer.md
+
+# OS
+.DS_Store
+Thumbs.db

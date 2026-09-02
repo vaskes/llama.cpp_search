@@ -1,0 +1,32 @@
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    # SearXNG 2026.x uses granian on :8080 INSIDE the container
+    ports:
+      - "8888:8080"
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_SECRET=change-me-in-prod-please-7f3a9b2c
+      - BIND_ADDRESS=0.0.0.0:8080
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

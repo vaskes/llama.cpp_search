@@ -1,0 +1,2 @@
+# Disable bot detection / rate limiting on this instance
+# (we trust localhost + explicit API users)
