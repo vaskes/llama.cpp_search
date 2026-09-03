@@ -1,0 +1,28 @@
+{
+  "_comment": "MCP server definitions for llama.cpp --mcp-servers-config. Pass to llama-server with --mcp-servers-config /opt/search/mcp-servers.json. Combined with --agent, this gives the model web search and browser tools natively.",
+  "mcpServers": {
+    "searxng": {
+      "command": "/opt/search/venv/bin/python",
+      "args": ["/opt/search/src/mcp_searxng_server.py"],
+      "env": {
+        "SEARXNG_URL": "http://localhost:8888",
+        "SEARXNG_LANG": "en",
+        "PATH": "/usr/bin:/bin"
+      }
+    },
+    "playwright": {
+      "command": "/opt/node20/bin/node",
+      "args": [
+        "/opt/search/node_modules/@playwright/mcp/cli.js",
+        "--headless",
+        "--isolated",
+        "--no-sandbox",
+        "--output-dir", "/opt/search/logs/playwright"
+      ],
+      "env": {
+        "PATH": "/opt/node20/bin:/usr/bin:/bin",
+        "HOME": "/home/git"
+      }
+    }
+  }
+}

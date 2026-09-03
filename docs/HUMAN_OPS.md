@@ -1,8 +1,16 @@
 # HUMAN_OPS — Runbook for llama.cpp_search
 
-This runbook is for a human operator setting up the stack on a fresh host.
+Это runbook для **разворачивания** на новой машине или **диагностики** на текущей.
 
-## 0. Hardware requirements
+## Что здесь
+
+- [Hardware requirements](#hardware-requirements)
+- [Установка с нуля](#установка-с-нуля)
+- [Подключение MCP к твоему llama-server](#подключение-mcp-к-твоему-llama-server)
+- [Диагностика](#диагностика)
+- [Troubleshooting](#troubleshooting)
+
+## Hardware requirements
 
 | Tier       | RAM    | GPU                | Models supported                          |
 | ---------- | ------ | ------------------ | ----------------------------------------- |
@@ -10,176 +18,210 @@ This runbook is for a human operator setting up the stack on a fresh host.
 | Recommended| 32 GB  | none               | Qwen3-27B Q4, Ornith-35B Q4 (32K ctx)     |
 | Full       | 64+ GB | NVIDIA 24+ GB VRAM | Any model, full 512K context, fast        |
 
-> ⚠️ **Do not run Ornith 35B Q8 at 512K context on less than 256 GB RAM.** It will OOM-kill.
+> ⚠️ **Не запускай Ornith 35B Q8 на 512K context на машине с < 256 GB RAM.** OOM-kill.
 
-## 1. Base host setup
+## Установка с нуля
+
+### 1. Базовый софт
 
 ```bash
 # Ubuntu 24.04
 sudo apt update && sudo apt install -y python3 python3-venv nodejs npm git docker.io
 
-# Node 20+ (Playwright MCP requirement)
+# Node 20+ (Playwright MCP требует)
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
 
-# Docker Compose v2 (already included in docker.io 24+)
+# Docker Compose v2 (включён в docker.io 24+)
 docker compose version
 ```
 
-## 2. llama.cpp
+### 2. llama.cpp
 
 ```bash
-# Build
 git clone https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp
 cd /opt/llama.cpp
 cmake -B build && cmake --build build --config Release -j
-
-# Verify
-./build/bin/llama-server --version
 ```
 
-Place GGUF models in `/opt/models/`.
+GGUF модели → `/opt/models/`.
 
-## 3. Install this repo
+### 3. llama.cpp_search
 
 ```bash
-# Clone
 git clone https://github.com/vaskes/llama.cpp_search.git /opt/search
 cd /opt/search
-
-# Python deps
 python3 -m venv venv
 ./venv/bin/pip install mcp openai httpx
-
-# Playwright MCP
 npm install @playwright/mcp
 ```
 
-## 4. Install systemd unit
-
-```bash
-# Copy the model-agnostic unit
-sudo cp systemd/llama.service /etc/systemd/system/llama.service
-sudo systemctl daemon-reload
-
-# Pick a preset (or write your own .env)
-sudo cp systemd/presets/llama-ornith-32k.env /etc/default/llama-server
-sudo systemctl enable --now llama.service
-
-# Verify
-systemctl status llama.service
-curl http://localhost:8080/health
-```
-
-## 5. Start SearXNG
+### 4. SearXNG
 
 ```bash
 cd /opt/search/docker
 docker compose up -d
-# wait 10-20 sec
-curl -s "http://localhost:8888/search?q=test&format=json" | head -c 300
+sleep 10
+curl -s "http://localhost:8888/search?q=test&format=json" | head -c 200
 ```
 
-## 6. Smoke test
+Для автостарта после ребута:
+```bash
+sudo tee /etc/systemd/system/searxng-compose.service > /dev/null <<'EOF'
+[Unit]
+Description=SearXNG metasearch engine (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+WorkingDirectory=/opt/search/docker
+ExecStartPre=-/usr/bin/docker compose down
+ExecStart=/usr/bin/docker compose up -d
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now searxng-compose.service
+```
+
+## Подключение MCP к твоему llama-server
+
+У тебя уже есть свой `llama-ornith.service` (или `llama-qwen38.service`, и т.д.). Чтобы добавить web search:
 
 ```bash
-cd /opt/search
-./venv/bin/python tests/test_basic.py
+sudo systemctl edit llama-ornith.service
 ```
 
-You should see all 5 tests pass.
+В открывшемся editor добавь (или в основной `[Service]` секции):
 
-## 7. End-to-end test
+```ini
+[Service]
+ExecStart=
+ExecStart=/opt/llama.cpp/build/bin/llama-server \
+  --model /opt/models/Ornith-1.5-35B-A3B-Q8_0.gguf \
+  --mmproj /opt/models/mmproj-Ornith-1.5-35B-A3B-bf16.gguf \
+  --jinja \
+  --agent \
+  --mcp-servers-config /opt/search/mcp-servers.json \
+  --port 8080 \
+  ...твои остальные флаги...
+```
+
+Ключевое: добавлены **только три** строчки:
+- `--jinja` (обязательно для tool calling)
+- `--agent` (включает MCP прокси)
+- `--mcp-servers-config /opt/search/mcp-servers.json` (подключает SearXNG + Playwright)
 
 ```bash
-./venv/bin/python src/agent.py "What is the boiling point of water?"
-./venv/bin/python src/agent.py "Find recent arXiv papers on transformer architecture"
-./venv/bin/python src/agent.py "Open https://example.com and tell me what's on it"
+sudo systemctl daemon-reload
+sudo systemctl restart llama-ornith.service
+journalctl -u llama-ornith.service -n 20 | grep "MCP"
+#  srv  start: MCP warmup: 'searxng' discovered 3 tools
+#  srv  start: MCP warmup: 'playwright' discovered 24 tools
+#  srv  setup: Added 27 MCP tools
 ```
 
-## 8. Daily use
+## Диагностика
+
+### Проверить что SearXNG работает
 
 ```bash
-# Switch model
-sudo cp systemd/presets/llama-qwen38-q4.env /etc/default/llama-server
-sudo systemctl restart llama.service
-
-# Update SearXNG settings (engines, formats, etc.)
-sudo $EDITOR /opt/search/docker/searxng/settings.yml
-cd /opt/search/docker && docker compose restart
-
-# Update mcp_searxng_server.py
-sudo $EDITOR /opt/search/src/mcp_searxng_server.py
-# (changes take effect on next agent.py run — no daemon to restart)
-
-# View agent logs
-tail -f /opt/search/logs/agent.log
-cat /opt/search/logs/last_answer.md
+curl -s "http://localhost:8888/search?q=python&format=json" | jq '.results | length'
+# должно быть > 0
 ```
 
-## 9. Troubleshooting
+### Проверить что MCP подключены
 
-### llama.service keeps restarting
-- Check journal: `journalctl -u llama.service -n 30`
-- Common: `port 8080 already in use` → another `llama-server` process is running. `pkill llama-server && sudo systemctl start llama.service`
-- Common: `couldn't allocate KV cache` → reduce `LLAMA_CTX_SIZE` in `/etc/default/llama-server`
+```bash
+curl -s http://localhost:8080/tools | jq 'length'
+# 27
 
-### SearXNG returns 0 results
-- Default engines (DDG, Startpage, Mojeek) often captcha-block from server IPs
-- The preset uses API-based engines (Wikipedia, arXiv, GitHub, OpenAlex, Crossref, PubMed, Wikidata, Semantic Scholar) which always work
-- For broader web search, set up a proxy or use a public SearXNG instance and change `SEARXNG_URL` in the MCP server
+curl -s http://localhost:8080/tools | jq '.[] | .name' | head
+# "search"
+# "engines"
+# "fetch_url"
+# "browser_navigate"
+# ...
+```
 
-### Agent errors with "unsupported content[].type"
-- This is the symptom of `args.prompt` being a list instead of a string
-- Fixed in current `agent.py`; if you see it, update the file
+### Проверить tool calling работает
 
-### Playwright MCP refuses to start
-- "Playwright requires Node.js 20 or higher" — install Node 20
-- Browser fails to launch — pass `--no-sandbox` (already in the wrapper)
+```bash
+curl -s http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Ornith-1.5-35B-A3B",
+    "messages": [{"role":"user","content":"What is the weather in Tokyo? Use the tool."}],
+    "tools": [{
+      "type":"function",
+      "function": {
+        "name":"get_weather",
+        "description":"Get current weather",
+        "parameters":{"type":"object","properties":{"city":{"type":"string"}}}
+      }
+    }],
+    "max_tokens": 500
+  }' | jq '.choices[0].message.tool_calls[0].function'
+```
 
-### MCP tool call returns isError=True
-- Check `logs/agent.log` for the actual error
-- For SearXNG: test `curl http://localhost:8888/search?q=test&format=json` directly
-- For Playwright: try a different URL, or check `--no-sandbox`
+Должно вернуть что-то вроде:
+```json
+{
+  "name": "get_weather",
+  "arguments": "{\"city\":\"Tokyo\"}"
+}
+```
 
-### OOM-killer
-- Check `dmesg | grep -i 'out of memory'`
-- Reduce model size or context length
-- See "Hardware requirements" above
+## Troubleshooting
 
-## 10. Backup and recovery
+### llama-server не поднимает MCP
 
-All state lives in:
-- `/opt/search/` — code, venv, docker config
-- `/opt/llama.cpp/build/` — built binary
-- `/opt/models/` — GGUF files (the big ones)
-- `/etc/default/llama-server` — current model preset
-- `/etc/systemd/system/llama.service` — unit file
+`journalctl -u llama-ornith` показывает `MCP warmup`?
+- **Нет** — флаг `--agent` забыт или модель не с `--jinja`
+- **Есть, но 0 tools** — `mcp-servers.json` неверный. Проверь синтаксис: `python3 -c "import json; print(json.load(open('/opt/search/mcp-servers.json')))"`
 
-Docker volumes for SearXNG are inside `/opt/search/docker/searxng/` (no external state).
+### SearXNG возвращает 0 результатов
 
-To redeploy elsewhere, just rsync these paths.
+API-движки должны работать всегда. Если 0:
+- `docker logs searxng | tail -20` — может быть network error
+- Проверь `curl "http://localhost:8888/engines"` — список активных движков
 
----
+### Playwright MCP отказывается стартовать
 
-## Appendix: model presets
+- "Playwright requires Node.js 20" → установи Node 20+
+- Браузер не запускается → добавь `--no-sandbox` в args
 
-| Preset                     | Model                              | ctx   | RAM  | Notes                                 |
-| -------------------------- | ---------------------------------- | ----- | ---- | ------------------------------------- |
-| `llama-ornith.env`         | Ornith-1.5-35B-A3B Q8_0 + mmproj   | 512K  | ≥256 | Full preset, mmproj vision            |
-| `llama-ornith-32k.env`     | Ornith-1.5-35B-A3B Q8_0 + mmproj   | 32K   | ≥64  | For RAM-constrained hosts             |
-| `llama-qwen38-q4.env`      | Qwen3.8-27B Q4_K_M (text only)     | 32K   | ≥24  | Lighter, faster, text-only            |
+### `Restart=on-failure` лупит в loop
 
-Create a new preset by copying any of these and editing variables.
+См. `docs/RESTART_GOTCHA.md`. Если два llama-сервиса дерутся за 8080 — `Restart=Prevent` или `Restart=no`.
 
----
+### Tool call returns isError=True
 
-## Tested presets on this host (llmhost2, 58 GB RAM, no GPU)
+Смотри `agent.log` или journal llama-server. Обычно:
+- SearXNG вернул error → `curl "http://localhost:8888/..."` руками
+- Playwright не смог открыть URL → другая страница
 
-| Preset                | Status  | Notes                                           |
-| --------------------- | ------- | ----------------------------------------------- |
-| `llama-ornith-32k.env`| ✅ works | Loads in ~50 sec, 40 GB RAM used                |
-| `llama-qwen38-q4.env` | ✅ works | Loads in ~25 sec, 22 GB RAM used (faster)       |
-| `llama-ornith.env`    | ❌ OOM   | 512K ctx needs ≥256 GB RAM                      |
+### model responds but ignores tools
 
-Recommended default: `llama-ornith-32k.env` for capability, `llama-qwen38-q4.env` for speed.
+- Модель не поддерживает tool calling (нужна Qwen3, Llama-3.x, Mistral, и т.д.)
+- `--jinja` забыт → chat template не рендерит tools
+
+## Backup and recovery
+
+Всё что нужно для recovery:
+- `/opt/search/` — код
+- `/opt/llama.cpp/build/` — бинарь
+- `/opt/models/` — GGUF файлы
+- `/etc/systemd/system/llama-*.service` — твои юниты (НЕ перезаписывай чужие!)
+
+Переустановка на новой машине:
+```bash
+rsync -av /opt/search/ newhost:/opt/search/
+rsync -av /opt/models/ newhost:/opt/models/  # долго если большие
+# на новой машине: поставить llama.cpp + SearXNG + добавить --mcp-servers-config
+```

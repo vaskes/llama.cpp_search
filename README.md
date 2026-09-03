@@ -1,152 +1,172 @@
 # llama.cpp_search
 
-A complete web-search + page-reading toolchain for **naked llama.cpp**.
+Web search + page reading для **любой llama.cpp с tool-calling моделью** через два MCP-сервера:
+- 🔍 **SearXNG** (self-hosted, JSON API) → MCP мост → `search/engines/fetch_url` tools
+- 📄 **@playwright/mcp** (Microsoft official) → 24 browser tools
 
-Give any tool-capable local model the ability to:
-
-- 🔍 **Search the web** via self-hosted [SearXNG](https://github.com/searxng/searxng)
-- 📄 **Read web pages** via [@playwright/mcp](https://github.com/microsoft/playwright-mcp) (or fallback `httpx` HTML parser)
-- 🛠️ **Call both as MCP tools** that llama.cpp's OpenAI-compat layer accepts
-
-Includes a model-agnostic `systemd` unit, a Python tool-calling agent, and everything needed to reproduce on another host.
-
----
-
-## Architecture
+Стек собирается из четырёх кусков:
 
 ```
-        ┌──────────────────────┐
-user ──▶│ agent.py (Python)    │  ──▶ llama.cpp server (OpenAI-compat :8080)
-        │   ↳ tool-calling loop│         ↑
-        └────┬─────────────────┘         │ tool_choice=auto
-             │ MCP (stdio)               │ jinja template
-   ┌─────────┴──────────┐
-   ▼                    ▼
-┌─────────────┐  ┌────────────────────┐
-│ SearXNG MCP │  │ @playwright/mcp    │
-│  (Python)   │  │   (Node, headless) │
-└──────┬──────┘  └─────────┬──────────┘
-       │                  │
-       ▼                  ▼
- SearXNG (Docker :8888)  Chromium (headless)
+                    llama.cpp server
+                    (--jinja --agent --mcp-servers-config)
+                            │
+              ┌─────────────┴─────────────┐
+              ▼                            ▼
+   ┌──────────────────┐         ┌──────────────────────┐
+   │ mcp_searxng_     │         │ @playwright/mcp      │
+   │ server.py        │         │  (Node 20 stdio)     │
+   └────────┬─────────┘         └─────────┬────────────┘
+            ▼                              ▼
+      SearXNG :8888                 Chromium (headless)
 ```
-
-Three components talk to each other:
-
-1. **llama.cpp** serves the model on `:8080` (must support tool calling — set `--jinja`).
-2. **SearXNG MCP** (`mcp_searxng_server.py`) is a Python MCP server that proxies SearXNG's JSON API. Exposes tools: `search`, `engines`, `fetch_url`.
-3. **Playwright MCP** (`@playwright/mcp`) is Microsoft's official MCP server. Exposes ~25 browser tools: `browser_navigate`, `browser_snapshot`, `browser_evaluate`, etc.
-4. **agent.py** boots all three as stdio MCP servers, lists their tools, and loops: prompt → model → tool_calls → MCP results → model → ... until final answer.
-
----
 
 ## Quick start
 
-### 1. Prerequisites
-
-- Linux host with ≥16 GB RAM (32 GB recommended for 27B+ models)
-- Python ≥ 3.11
-- Node.js ≥ 20 (Playwright MCP refuses to run on Node 18)
-- Docker + Compose v2
-- llama.cpp already built and reachable (default: `http://localhost:8080`)
-
-### 2. Run the stack
+### 1. Поднять SearXNG (Docker)
 
 ```bash
-# 1. Start SearXNG (port 8888)
-cd docker && docker compose up -d
-
-# 2. Start llama.cpp with --jinja (see systemd/ for our model-agnostic unit)
-sudo systemctl start llama
-
-# 3. Use the agent
-cd ..
-./venv/bin/python src/agent.py "What is the capital of France?"
-./venv/bin/python src/agent.py "Find recent arXiv papers on Mamba architectures"
-./venv/bin/python src/agent.py "Open https://example.com and tell me what's on it"
+cd /opt/search/docker
+docker compose up -d
+sleep 8
+curl -s "http://localhost:8888/search?q=test&format=json" | head -c 200
 ```
 
-The agent logs every tool call to `logs/agent.log` and saves the final answer to `logs/last_answer.md`.
-
-### 3. Switch the model
-
-The `llama.service` unit is **model-agnostic** — all parameters come from `/etc/default/llama-server`. To switch:
+### 2. Поставить Python MCP зависимости
 
 ```bash
-sudo cp systemd/presets/llama-qwen38-q4.env /etc/default/llama-server
-sudo systemctl restart llama
+python3 -m venv /opt/search/venv
+/opt/search/venv/bin/pip install mcp openai httpx
 ```
 
-Presets included:
-- `llama-ornith.env` — original Ornith 35B at 512K ctx (needs ≥256 GB RAM or GPU)
-- `llama-ornith-32k.env` — same model, 32K ctx, fits in 58 GB
-- `llama-qwen38-q4.env` — Qwen3.8-27B Q4_K_M, lighter weight
+### 3. Поставить Playwright MCP (Node ≥20)
 
-See `systemd/presets/` for full list. Create your own `.env` file with the same variables.
+```bash
+cd /opt/search
+npm install @playwright/mcp
+# Node 20+ обязателен (Node 18 отвергается плагином)
+```
+
+### 4. Подключить MCP к llama-server
+
+Добавь в свой `llama-server` (тот, что у тебя уже есть в `/etc/systemd/system/llama-*.service`) **два флага**:
+
+```bash
+--jinja
+--mcp-servers-config /opt/search/mcp-servers.json
+```
+
+Конкретный пример для `llama-ornith.service`:
+
+```ini
+[Service]
+ExecStart=/opt/llama.cpp/build/bin/llama-server \
+  --model /opt/models/Ornith-1.5-35B-A3B-Q8_0.gguf \
+  --mmproj /opt/models/mmproj-Ornith-1.5-35B-A3B-bf16.gguf \
+  --jinja \
+  --agent \                                    # ← включает MCP-инструменты
+  --mcp-servers-config /opt/search/mcp-servers.json \   # ← SearXNG + Playwright
+  --ctx-size 32768 \
+  --port 8080 \
+  ...
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart llama-ornith
+journalctl -u llama-ornith | grep "MCP warmup"
+#  srv  start: MCP warmup: 'searxng' discovered 3 tools
+#  srv  start: MCP warmup: 'playwright' discovered 24 tools
+#  srv  setup: Added 27 MCP tools
+```
+
+### 5. Использовать из любого OpenAI-клиента
+
+```bash
+# curl
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Ornith-1.5-35B-A3B",
+    "messages": [{"role":"user","content":"Find recent arXiv papers on Mamba"}],
+    "tools": [...],
+    "max_tokens": 1500
+  }'
+```
+
+Чтобы узнать **список tools** без чтения исходников:
+
+```bash
+curl http://localhost:8080/tools | jq
+```
+
+### 6. Если у тебя нет своего клиента — есть готовый `agent.py`
+
+```bash
+/opt/search/venv/bin/python /opt/search/src/agent.py "Find recent arXiv papers on Mamba"
+# Ответ в stdout и в /opt/search/logs/last_answer.md
+```
+
+`agent.py` — это standalone Python-клиент, который:
+1. Подключается к `http://localhost:8080/v1/chat/completions`
+2. Получает список tools из `/tools` endpoint
+3. Делает tool-calling loop до final answer
+4. Логирует всё в `/opt/search/logs/agent.log`
+
+**Альтернатива:** LM Studio, Open WebUI, Jan, или любой MCP-aware клиент тоже работают с теми же 27 tools.
 
 ---
 
-## Files
+## Что в репе
 
-| Path                          | What it is                                                |
-| ----------------------------- | --------------------------------------------------------- |
-| `src/agent.py`                | Tool-calling agent loop (model + MCP servers)             |
-| `src/mcp_searxng_server.py`   | MCP server bridging agent ↔ SearXNG                       |
-| `docker/docker-compose.yml`   | SearXNG container                                         |
-| `docker/searxng/settings.yml` | SearXNG config (engines, formats, bot detection)          |
-| `systemd/llama.service`       | Model-agnostic unit (installed to `/etc/systemd/system/`) |
-| `systemd/presets/*.env`       | Model presets for `/etc/default/llama-server`             |
-| `docs/AGENT_GUIDE.md`         | Instructions for an LLM agent to use this stack           |
-| `docs/HUMAN_OPS.md`           | Operations / troubleshooting runbook                      |
-
----
-
-## How the tool calling works
-
-1. Agent collects MCP tools from both servers (27 in total).
-2. Each MCP tool schema is converted to OpenAI's `function` format. We **strip `$schema` and `additionalProperties`** from the input schema — llama.cpp's OpenAI-compat layer rejects them.
-3. We send `chat.completions.create(messages=..., tools=[...], tool_choice="auto")`.
-4. When the model returns `tool_calls`, we look up the owning MCP session and call the tool.
-5. We append the result as a `role: "tool"` message and loop.
-
-> **Why a custom agent loop instead of using llama-server's `--agent`?**
-> The built-in `--agent` mode requires a single MCP endpoint configured at server start. Our loop is portable — works with any llama-server, lets you add/remove MCP servers, and gives full control over iteration limits and logging.
+| Path                          | Что это                                              |
+| ----------------------------- | ---------------------------------------------------- |
+| `mcp-servers.json`            | MCP-конфиг для `--mcp-servers-config`                |
+| `src/mcp_searxng_server.py`   | MCP-мост к SearXNG (3 tools: search/engines/fetch_url) |
+| `src/agent.py`                | Standalone tool-calling клиент (нужен если нет своего) |
+| `bin/playwright-mcp`          | Wrapper для @playwright/mcp (Node 20)                |
+| `docker/docker-compose.yml`   | SearXNG container                                     |
+| `docker/searxng/settings.yml` | SearXNG конфиг (engines без captcha)                 |
+| `docs/AGENT_PROMPT.md`        | Копипастить в задание агенту                         |
+| `docs/AGENT_GUIDE.md`         | Полная инструкция для LLM-агента                     |
+| `docs/HUMAN_OPS.md`           | Runbook для человека                                 |
+| `docs/RESTART_GOTCHA.md`      | Грабли с `Restart=on-failure`                        |
 
 ---
 
-## Known gotchas
+## Используемые движки SearXNG
 
-- **SearXNG bot detection** blocks DuckDuckGo, Startpage, Mojeek from server IPs. The config in this repo enables API-based engines (Wikipedia, arXiv, GitHub, OpenAlex, Crossref, PubMed, Wikidata, Semantic Scholar) that don't captcha-block. For broader web search, use a proxy or a public SearXNG instance.
-- **llama.cpp 0.3.0-dev** supports reasoning models (the response includes a `reasoning_content` field). Set `max_tokens ≥ 500` to leave room for thinking + answer.
-- **MCP tool schemas** often include `"$schema"` and `"additionalProperties": false`. Strip them before sending to llama.cpp.
-- **Playwright MCP** requires Node.js ≥ 20. We install `@playwright/mcp@latest` in this repo; chromium is downloaded on first `browser_navigate`.
+API-based движки, не капчатят self-hosted:
+- wikipedia, arxiv, github, wikidata
+- openalex, semantic scholar, pubmed, crossref
+
+Капчащие (DDG/Startpage/Mojeek) **отключены** в `docker/searxng/settings.yml`. Для общего web — Playwright.
+
+---
+
+## Грабли
+
+- **`--jinja` обязателен** — без него tools не рендерятся в chat template
+- **Node ≥20** для @playwright/mcp (Node 18 отвергается). Если есть `/opt/node20/`, используй его
+- **Движки SearXNG капчатят** от server IP. Используй API-движки либо Playwright
+- **`Restart=on-failure` лупит** в loop если порт занят (см. `docs/RESTART_GOTCHA.md`)
+- **reasoning модели** (Ornith) сжигают max_tokens на `reasoning_content`. Ставь `max_tokens ≥ 500`
 
 ---
 
 ## Replicating on a new host
 
-See `docs/HUMAN_OPS.md` for step-by-step reproduction.
-
----
-
-## Verified on 2026-09-03
-
-Working on `llmhost2` (58 GB RAM, no GPU, Ubuntu 24.04):
-
-```text
-$ python src/agent.py "What is the capital of Japan?"
-[01:00:01] ASSISTANT: The capital of Japan is **Tokyo**.  (no tool calls)
-
-$ python src/agent.py "Find recent arXiv papers on transformer architecture"
-[01:00:01] ITER #1 → search(arxiv) → 3 results
-[01:00:02] ITER #2 → final answer with 3 titles + URLs
-
-$ python src/agent.py "Use the search tool to find info about Python"
-[01:00:01] ITER #1 → search() → 0 results (no engines specified)
-[01:00:02] ITER #2 → browser_navigate to wikipedia.org/wiki/Python_(programming_language)
-[01:00:03] ITER #3 → browser_evaluate to extract text
-[01:00:04] ITER #4 → final summary
+```bash
+git clone https://github.com/vaskes/llama.cpp_search.git /opt/search
+cd /opt/search
+python3 -m venv venv && ./venv/bin/pip install mcp openai httpx
+npm install @playwright/mcp
+cd docker && docker compose up -d
 ```
 
-Model: **Ornith-1.5-35B-A3B** at 32K context (fits in 58 GB RAM).
-Average full cycle: **30–90 sec** on CPU.
+Потом в свой llama-*.service добавь:
+```ini
+--jinja
+--mcp-servers-config /opt/search/mcp-servers.json
+```
+
+Подробнее — `docs/HUMAN_OPS.md`.

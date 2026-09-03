@@ -1,23 +1,49 @@
 # AGENT_GUIDE — How to use llama.cpp_search as a tool
 
-This document is for **another LLM agent** that has been told to use this stack to answer questions.
-Read it carefully before calling anything.
+This document is for **another LLM agent** that has been told to use this stack.
 
-## When to use this tool
+## Two ways to use the stack
 
-Use this stack when:
-- The user asks a question that requires **current information** (news, recent papers, prices, weather, recent events)
-- The user wants to **read the content of a specific URL** (article, documentation page, blog post)
-- The user asks you to **search the web** for something
+### A. Shell-exec a Python client (easiest)
 
-Do NOT use this stack for:
-- Questions you can answer from your own knowledge
-- Math, code generation, file editing on the local host (use your own tools)
-- Anything that does not require the live web
+If you can run shell commands:
 
-## What you have
+```bash
+/opt/search/venv/bin/python /opt/search/src/agent.py "your question here"
+```
 
-After you start `python src/agent.py "<your prompt>"`, three MCP servers come alive:
+The client:
+1. Lists tools from `GET http://localhost:8080/tools`
+2. Loops: prompt → model → tool_call → execute tool (via OpenAI-compat MCP under the hood) → model → final
+3. Logs every step to `/opt/search/logs/agent.log`
+4. Saves final answer to `/opt/search/logs/last_answer.md`
+
+### B. Use your own OpenAI client with MCP
+
+If you have an MCP-aware client (LM Studio, Open WebUI, custom code):
+
+1. **Get tools**:
+   ```bash
+   curl -s http://localhost:8080/tools | jq '.[] | {name, description}'
+   ```
+2. **Make a request**:
+   ```python
+   from openai import OpenAI
+   client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
+   resp = client.chat.completions.create(
+       model="<model name>",  # whatever's running
+       messages=[{"role": "user", "content": "your question"}],
+       tools=<list from /tools endpoint>,
+       tool_choice="auto",
+       max_tokens=1500,
+   )
+   ```
+3. **Handle `tool_calls`**: execute via your MCP client, append result as `role: "tool"` message, retry.
+4. **Loop until `finish_reason == "stop"`**.
+
+## What tools you have
+
+After you start the agent or list `/tools`, you get 27 MCP tools:
 
 ### SearXNG MCP — 3 tools
 - `search(query, max_results=5, engines="", language="")` — search the web
@@ -36,6 +62,18 @@ Key ones:
 - `browser_wait_for` — wait for text/time
 
 Other tools (`browser_close`, `browser_resize`, `browser_console_messages`, `browser_tabs`, `browser_network_requests`, etc.) are situational.
+
+## When to use this tool
+
+Use this stack when:
+- The user asks a question that requires **current information** (news, recent papers, prices, weather, recent events)
+- The user wants to **read the content of a specific URL** (article, documentation page, blog post)
+- The user asks you to **search the web** for something
+
+Do NOT use this stack for:
+- Questions you can answer from your own knowledge
+- Math, code generation, file editing on the local host (use your own tools)
+- Anything that does not require the live web
 
 ## Recommended workflows
 
@@ -75,10 +113,11 @@ Most factual questions can be answered from your own knowledge. Only use the sta
 - **Page content is empty after navigate**: use `browser_wait_for` with `{"text": "expected text"}` then re-snapshot
 - **llama-server returns "Loading model"**: wait 10–30 sec, retry. The 35B Q8_0 model on CPU takes ~1 min to load
 - **Tool call returns isError=True**: pass the error to the user honestly; do not invent a result
+- **MCP server not connecting**: check `journalctl -u <your-llama-service> | grep "MCP warmup"` — should show "discovered N tools" for each
 
 ## Performance
 
-- Average full cycle: **30–90 sec** on CPU (Ornith 35B Q4/Q8 @ 15 tok/s + 1–2 tool calls)
+- Average full cycle: **30–90 sec** on CPU (35B Q4/Q8 @ 15 tok/s + 1–2 tool calls)
 - Each tool call adds **2–15 sec** (SearXNG) or **5–20 sec** (Playwright)
 - Plan for **3–5 iterations** max to stay under 2 min
 
@@ -86,25 +125,25 @@ Most factual questions can be answered from your own knowledge. Only use the sta
 
 ```bash
 # basic Q&A
-python src/agent.py "What is the capital of Japan?"
+python /opt/search/src/agent.py "What is the capital of Japan?"
 
 # search
-python src/agent.py "Find recent arXiv papers on Mamba. List 5 titles with URLs."
+python /opt/search/src/agent.py "Find recent arXiv papers on Mamba architectures"
 
 # read a URL
-python src/agent.py "Open https://en.wikipedia.org/wiki/Python and summarize the history section"
+python /opt/search/src/agent.py "Open https://example.com and tell me what's on it"
 
 # longer output
-python src/agent.py "..." --max-tokens 2000 --max-iter 6
+python /opt/search/src/agent.py "..." --max-tokens 2000 --max-iter 6
 
 # save answer to custom path
-python src/agent.py "..." --out /tmp/my_answer.md
+python /opt/search/src/agent.py "..." --out /tmp/my_answer.md
 ```
 
 ## Limits
 
-- **max-iter** defaults to 8. If you hit it, the agent gives up and says so.
-- **max-tokens** defaults to 800. For thinking models (like Ornith), set ≥ 500 so thinking has room.
+- **`max-iter`** defaults to 8. If you hit it, the agent gives up and says so.
+- **`max-tokens`** defaults to 800. For thinking models (like Ornith), set ≥ 500 so thinking has room.
 - Results truncated to 6000 chars per tool response (then sent back to the model).
 
 ## Don't
