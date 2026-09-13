@@ -1,3 +1,16 @@
+# ⚠️ DEPRECATED
+
+> **Этот документ устарел.** Описанный в нём SearXNG-based стек больше не работает
+> (CAPTCHA на российских IP). Используйте [DONSETCH_DEPLOY.md](DONSETCH_DEPLOY.md) и
+> [QUICKSTART.md](QUICKSTART.md) вместо этого. Файл сохранён в git для истории проекта.
+>
+> Ключевая замена:
+> - SearXNG container →  (Rust MCP + Playwright)
+> -  →  (уже в репо)
+> - 3 SearXNG tools → 4 donsetch tools (web_search, web_fetch, web_crawl, web_screenshot)
+
+---
+
 # AGENT_PROMPT — копипастить в каждое задание агенту
 
 > Тебе доступен **web search и чтение страниц** через локальный toolchain.

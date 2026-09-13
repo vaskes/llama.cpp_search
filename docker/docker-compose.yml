@@ -1,32 +1,45 @@
 services:
-  searxng:
-    image: searxng/searxng:latest
-    container_name: searxng
-    restart: unless-stopped
-    # SearXNG 2026.x uses granian on :8080 INSIDE the container
-    ports:
-      - "8888:8080"
-      - "127.0.0.1:9090:9090"
-    volumes:
-      - ./searxng:/etc/searxng:rw
+  # DonSeTch HTTP MCP — web search, fetch, crawl, screenshot.
+  # Anti-bot tier-2 browser solves CAPTCHAs, then 6 engines aggregate results.
+  # Built locally from /opt/hound/Dockerfile with INSTALL_CHROME=true.
+  # See docs/DONSETCH.md for full setup.
+  donsetch-http:
+    profiles: ["http"]
+    build:
+      context: /opt/hound
+      args:
+        INSTALL_CHROME: "true"
+    image: donsetch-mcp:latest
+    container_name: donsetch-http
     environment:
-      - SEARXNG_SECRET=change-me-in-prod-please-7f3a9b2c
-      - BIND_ADDRESS=0.0.0.0:8080
-    cap_drop:
-      - ALL
-    cap_add:
-      - CHOWN
-      - SETGID
-      - SETUID
-      - DAC_OVERRIDE
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      DONSETCH_TRANSPORT: "http"
+      DONSETCH_HTTP_HOST: "0.0.0.0"
+      DONGHOST_NO_SANDBOX: "1"
+      NO_COLOR: "1"
+    ports:
+      - "8765:8765"
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/"]
+      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/8765"]
       interval: 30s
-      timeout: 5s
+      timeout: 3s
       retries: 3
-      start_period: 20s
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 45s
+    init: true
+    volumes:
+      - donsetch-cache:/home/donsetch/.cache/donsetch
+    networks:
+      - default
+      - agent-stack_agent-net
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+volumes:
+  donsetch-cache:
+
+networks:
+  agent-stack_agent-net:
+    external: true
