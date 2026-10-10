@@ -338,6 +338,21 @@ async def _body(args, prompt, logf, exit_stack):
     return final
 
 async def run_agent(args):
+    """Orchestrate one agent run.
+
+    Resource ownership:
+      - `exit_stack` is hoisted to the top of this function so the
+        MCP stdIO subprocesses survive an exception out of `_body()`.
+        `AsyncExitStack` does NOT support `async with` directly;
+        manual `try/finally: aclose()` is the canonical idiom.
+      - The log file is opened by the `with open(...)` block; the
+        FD is closed by R5 (with-block, not the old success-only
+        close).
+      - `_body()` does the real work (model handshake, MCP connect,
+        tool-call loop, save final). The split exists only so the
+        `try/finally` around `_body()` can run aclose() on any
+        exception path.
+    """
     # Resolve prompt from either source (R6 fix).
     prompt = args.prompt_str or " ".join(args.prompt_words) or ""
     if not prompt:

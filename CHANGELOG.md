@@ -5,7 +5,56 @@ Format: [Semantic Versioning](https://semver.org/) + sections
 per release. The repo's `git log` is the granular record;
 this file is the human-readable summary.
 
-## [Unreleased]
+## [v0.4.1] — 2026-10-10 — v0.4.0 re-review polish
+
+### Fixed
+
+  - **N1** `src/agent.py` — `exit_stack` was created inside the
+    `with open(log)` block and only `aclose()`'d on the success
+    path. If `models.list()` or any other early call raised, the
+    MCP stdIO subprocess (shim child of `StdioServerParameters`)
+    was orphaned until the asyncio loop's shutdown hook fired —
+    and if the loop already shut down, never. Hoisted `exit_stack`
+    to the function top, extracted the body to a `_body()`
+    helper, wrapped the call in `try/finally: aclose()`. Comment
+    explains why `async with AsyncExitStack` doesn't work
+    directly.
+  - **N2** `src/agent.py` — dead `import re` at the top of the
+    file (leftover from the deleted `_search_*` helpers).
+  - **N3** `docs/DONSETCH.md` — stale "image content is dropped"
+    paragraph in the `web_screenshot` section. v0.4.0 fixed the
+    drop in `agent.py`; this v0.4.1 also fixes the
+    contradictory tail that survived v0.4.1's first attempt.
+  - **N4** `README.md` — Files table listed 3 paths deleted in
+    v0.4.0 (`docs/AGENT_GUIDE.md`, `docs/AGENT_PROMPT.md`,
+    `deprecated/playwright_search_proxy.py`) and claimed
+    `package.json` had a Playwright dep. Rewrote the table to
+    match the actual manifest.
+  - **N5** `src/mcp_donsetch_stdio.py` — new `httpx.AsyncClient`
+    per request, no HTTP/1.1 keep-alive. Hoisted to a
+    module-level singleton via `_get_client()`, `aclose()` in
+    `main()`'s `finally`.
+  - **N6** `src/mcp_donsetch_stdio.py` — `Mcp-Session-Id` was
+    captured before `raise_for_status()`. If donsetch returned
+    5xx with a `Mcp-Session-Id` (e.g. via a proxy that injects
+    one), we'd cache a header from a failed response. Reordered.
+  - **N7** `tests/test_shim_smoke.py` — `test_04` was
+    `assertTrue("result" in resp or "error" in resp)`, which
+    passes on any valid JSON-RPC response. Tightened to
+    `assertIn("error", resp)` and `assertNotIn("result", resp)`.
+  - **N8** `docs/DONSETCH.md` — `DONSETCH_MCP__TEXT_ONLY` env var
+    mentioned with no context that it lives in donsetch's
+    docker-compose env, not in the shim. Added a clarifying
+    parenthetical.
+  - **N9** `src/mcp_donsetch_stdio.py` — `r.text` was called
+    just to check `startswith("data:")`. Now peeks at
+    `r.headers.get("content-type", "")` first.
+
+### No production behavior change
+
+End users see the same 4 tools, same JSON-RPC, same wire format.
+The 5 shim smoke tests still pass; `test_04` is now actually
+exercising the error path that v0.4.0's weak assertion missed.
 
 ## [v0.4.0] — 2026-10-10 — code-review response
 
