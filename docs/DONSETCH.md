@@ -76,7 +76,9 @@ Read one URL (or a small batch) as clean markdown.
 The text content is in `result.content[0].text` as markdown.
 The same content is duplicated as JSON in `structuredContent`
 when donsetch is configured with `DONSETCH_MCP__TEXT_ONLY=false`
-(the configuration this repo uses).
+(the configuration this repo uses — set in donsetch's
+`docker-compose.yml` under `environment:`, NOT in this repo
+or the shim; the shim forwards whatever shape donsetch returns).
 
 ## `web_crawl`
 
@@ -121,8 +123,7 @@ Capture a URL as a PNG.
 ### Result format
 
 Returns image content (`ImageContent` with base64 `data` and
-`mimeType: image/png`). **The stdIO shim and the `agent.py`
-test client currently drop image content silently** — they
+`mimeType: image/png`). **Image content passes through the shim unchanged as of v0.4.0.** The `agent.py` test client emits image content as a `data:image/png;base64,...` markdown URL the model can ingest if it's vision-capable, and logs a `WARN` if the image is dropped. What llama-server does with the image is llama-server's problem. The stdIO shim's only contract is JSON-RPC in, JSON-RPC out. — they
 return `(empty)` to the model. If you need this tool in
 production, either:
 - extend the shim to pass image content as a data: URL the

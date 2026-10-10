@@ -125,7 +125,9 @@ class ShimSmoke(unittest.TestCase):
 
     def test_04_error_passes_through(self):
         """If donsetch returns a JSON-RPC error, the shim forwards
-        it as an `error` field, not a `result`."""
+        it as an `error` field, not a `result`. Verify the error
+        envelope is preserved (not silently coerced into `result`).
+        """
         p = _spawn_shim()
         try:
             _send(p, {
@@ -136,7 +138,14 @@ class ShimSmoke(unittest.TestCase):
                 },
             })
             resp = _read_jsonl(p, timeout=30)
-            self.assertTrue("result" in resp or "error" in resp)
+            # donsetch returns {"code": -32602, "message": "..."} for
+            # an unknown tool. The shim must surface that as `error`,
+            # not swallow it into `result` or `null`.
+            self.assertIn("error", resp,
+                          f"expected error envelope, got: {resp}")
+            self.assertNotIn("result", resp,
+                             f"error path must not carry a result, got: {resp}")
+            self.assertEqual(resp.get("id"), 1)
         finally:
             p.terminate()
             p.wait(timeout=5)

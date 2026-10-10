@@ -11,18 +11,21 @@
 
 | Path | What it is |
 |------|------------|
-| `mcp-servers.json` | stdIO config for `llama.cpp --mcp-servers-config` |
-| `src/mcp_donsetch_stdio.py` | stdIO wrapper: forwards MCP calls to donsetch-http |
-| `src/agent.py` | OpenAI-compatible tool-calling test client |
-| `docs/deploy_donsetch.sh` | One-shot deploy script for fresh installs |
-| `docs/DONSETCH_DEPLOY.md` | Full deploy walkthrough |
-| `docs/QUICKSTART.md` | 5-minute setup |
-| `docs/HUMAN_OPS.md` | Operator notes |
-| `docs/AGENT_GUIDE.md` | Notes for AI agents working on this stack |
-| `docs/AGENT_PROMPT.md` | Snippet to paste into agent tasks |
-| `docs/RESTART_GOTCHA.md` | Things to know about restarts |
-| `package.json` + `package-lock.json` | Playwright dep (kept for the stdIO wrapper's browser fallback) |
-| `deprecated/playwright_search_proxy.py` | Old Bing-via-Playwright proxy, kept for history. Safe to delete. |
+| Path | Purpose |
+|------|---------|
+| `src/mcp_donsetch_stdio.py` | The stdIO bridge. Spawned by `llama-server --mcp-servers-config`. Forwards JSON-RPC to donsetch-http at 127.0.0.1:8765/mcp. |
+| `src/agent.py` | Test client: a small tool-calling agent loop that talks to llama-server's OpenAI-compat endpoint and the MCP shim. Used for ad-hoc smoke tests; production goes through llama-server's `--mcp-servers-config`. |
+| `mcp-servers.json` | stdIO MCP config: declares the single MCP server (the shim) with its absolute path. Read by `llama-server --mcp-servers-config`. |
+| `docs/DONSETCH.md` | Per-tool reference for the 4 tools (`web_search`, `web_fetch`, `web_crawl`, `web_screenshot`): parameters, return shape, error semantics, version pinning. |
+| `docs/DONSETCH_DEPLOY.md` | Step-by-step deploy of donsetch-http: prereqs, clone, build, run, verify, "what you can break". |
+| `docs/deploy_donsetch.sh` | The deploy script referenced by `DONSETCH_DEPLOY.md`. One-shot. |
+| `docs/QUICKSTART.md` | 5-minute end-to-end walk from clean host to first search. |
+| `docs/HUMAN_OPS.md` | Operator notes: restart cycle, systemd pitfalls, backup, sanity checks, escalation paths. |
+| `docs/RESTART_GOTCHA.md` | Why `Restart=on-failure` is dangerous for heavy llama services. |
+| `tests/test_shim_smoke.py` | 5 subprocess-driven tests against the live donsetch-http (skipped if unreachable). |
+| `package.json` | Minimal manifest: `scripts.test` and an empty `dependencies`. There is no Playwright dep, no `package-lock.json`, no Node code in this repo. |
+| `LICENSE` | Custom Kuduza Ai Lab license: public visibility, no grant of rights, no ML training, Russian jurisdiction. |
+| `CHANGELOG.md` | Per-release Added/Changed/Fixed. Semantic versioning. |
 
 ## Quickstart
 

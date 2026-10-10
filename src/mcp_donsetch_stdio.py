@@ -23,6 +23,16 @@ DONSETCH_URL = os.environ.get("DONSETCH_URL", "http://127.0.0.1:8765/mcp")
 # Mcp-Session-Id header on the initialize response and must be
 # sent on every subsequent request. We capture and forward it.
 _session_id: str | None = None
+# N5: one AsyncClient per shim process so HTTP/1.1 keep-alive
+# reuses the TCP connection across requests.
+_client: httpx.AsyncClient | None = None
+
+
+async def _get_client() -> httpx.AsyncClient:
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=120.0)
+    return _client
 
 
 async def call_remote(method: str, params: dict | None = None, req_id: int = 1) -> dict:
@@ -46,33 +56,46 @@ async def call_remote(method: str, params: dict | None = None, req_id: int = 1) 
         # so the server can correlate the calls.
         headers["Mcp-Session-Id"] = _session_id
 
-    async with httpx.AsyncClient(timeout=120.0) as c:
-        r = await c.post(DONSETCH_URL, json=payload, headers=headers)
-        # Capture the session id from the response if this is the
-        # first request. The server only sets it after a successful
-        # initialize; subsequent calls carry the value we already
-        # cached above.
-        sid = r.headers.get("Mcp-Session-Id")
-        if sid and not _session_id:
-            _session_id = sid
-        r.raise_for_status()
-        # Streamable-HTTP may return SSE-formatted body. A single
-        # SSE event can have multiple `data:` lines that must be
-        # joined with `\n` before JSON parsing. We split on blank
-        # lines (event boundaries), accumulate `data:` lines per
+    # N5: reuse a single AsyncClient for the lifetime of the shim
+    # so we get HTTP/1.1 keep-alive instead of a new TCP connect per
+    # request. The client is created lazily on first call and closed
+    # in main()'s finally.
+    c = await _get_client()
+    r = await c.post(DONSETCH_URL, json=payload, headers=headers)
+    # N6: raise_for_status BEFORE reading the session id header. If
+    # donsetch returns 5xx with a Mcp-Session-Id (e.g. through a
+    # proxy that injects one), we don't want to cache a header
+    # from a failed response.
+    r.raise_for_status()
+    # Capture the session id from the response if this is the
+    # first request. The server only sets it after a successful
+    # initialize; subsequent calls carry the value we already
+    # cached above.
+    sid = r.headers.get("Mcp-Session-Id")
+    if sid and not _session_id:
+        _session_id = sid
+    # N9: peek at Content-Type before reading the body. Most
+    # responses are small JSON; SSE responses are also small.
+    # The peek avoids forcing httpx to fully decode just to
+    # check the first 5 bytes.
+    ctype = r.headers.get("content-type", "")
+    if "text/event-stream" in ctype:
+        # Streamable-HTTP SSE response. A single SSE event can
+        # have multiple `data:` lines that must be joined with
+        # `\n` before JSON parsing. We split on blank lines
+        # (event boundaries), accumulate `data:` lines per
         # event, and parse the first event that has any.
         body = r.text
-        if body.startswith("data:"):
-            for event_block in body.split("\n\n"):
-                data_lines = []
-                for line in event_block.split("\n"):
-                    if line.startswith("data:"):
-                        data_lines.append(line[len("data:"):].lstrip())
-                if data_lines:
-                    return json.loads("\n".join(data_lines))
-            # No data: lines anywhere in the SSE body — server-side
-            # protocol error. Fall through to plain-JSON parse.
-        return json.loads(body)
+        for event_block in body.split("\n\n"):
+            data_lines = []
+            for line in event_block.split("\n"):
+                if line.startswith("data:"):
+                    data_lines.append(line[len("data:"):].lstrip())
+            if data_lines:
+                return json.loads("\n".join(data_lines))
+        # No data: lines anywhere in the SSE body — server-side
+        # protocol error. Fall through to plain-JSON parse.
+    return json.loads(r.text)
 
 
 def emit(obj: dict) -> None:
@@ -97,6 +120,19 @@ async def stdin_reader() -> asyncio.StreamReader:
 
 
 async def main() -> None:
+    try:
+        await _run()
+    finally:
+        # N5 (part 2): close the shared AsyncClient so the underlying
+        # HTTP connection is released cleanly. Without this the shim
+        # would exit with a "unclosed client" warning.
+        global _client
+        if _client is not None:
+            await _client.aclose()
+            _client = None
+
+
+async def _run():
     reader = await stdin_reader()
     while True:
         line = await reader.readline()

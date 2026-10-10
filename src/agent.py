@@ -15,7 +15,6 @@ import argparse
 import asyncio
 import json
 import os
-import re
 import sys
 import time
 from contextlib import AsyncExitStack
@@ -175,6 +174,169 @@ def _tool_result_to_text(content_blocks, fn_name: str, logf) -> str:
     return "\n".join(parts) or "(empty)"
 
 
+async def _body(args, prompt, logf, exit_stack):
+    """Body of run_agent() extracted so the with-block can wrap
+    the call in try/finally for exit_stack cleanup. Receives the
+    log file and exit_stack from the caller.
+    """
+
+    log_msg(logf, "START",
+            f"prompt='{prompt[:200]}' max_iter={args.max_iter} "
+            f"model={args.model}")
+
+    client = OpenAI(base_url=f"{args.llama_url}/v1",
+                    api_key="not-needed", timeout=args.timeout)
+    model = args.model
+    if model == "auto":
+        try:
+            ms = client.models.list(timeout=10)
+            model = ms.data[0].id
+        except Exception as e:
+            log_msg(logf, "ERR", f"models.list failed: {e}")
+            raise
+
+    # Connect to MCP servers (donsetch stdIO shim only).
+    sessions = []
+    # name -> (session, tool) for O(1) lookup AND duplicate-name
+    # detection (R8 + S4). The previous linear scan silently
+    # picked the first match if two servers registered the same
+    # tool name.
+    tools_by_name: dict[str, tuple[ClientSession, object]] = {}
+    for p in make_mcp_params():
+        try:
+            read, write = await exit_stack.enter_async_context(
+                stdio_client(p))
+            sess = await exit_stack.enter_async_context(
+                ClientSession(read, write))
+            await sess.initialize()
+            sessions.append(sess)
+            tools_resp = await sess.list_tools()
+            for t in tools_resp.tools:
+                if t.name in tools_by_name:
+                    log_msg(logf, "ERR",
+                            f"tool '{t.name}' registered by TWO servers; "
+                            f"keeping the first")
+                    continue
+                tools_by_name[t.name] = (sess, t)
+            log_msg(logf, "MCP",
+                    f"connected, {len(tools_resp.tools)} tools")
+        except Exception as e:
+            log_msg(logf, "ERR", f"MCP connect failed: {e}")
+
+    all_tools = list(tools_by_name.values())
+    openai_tools = [mcp_to_openai_tool(t) for _, t in all_tools]
+    log_msg(logf, "TOOLS",
+            f"{len(openai_tools)} tools exposed: "
+            f"{[t['function']['name'] for t in openai_tools]}")
+
+    messages = [
+        {"role": "system", "content": (
+            "You are a research assistant with web search and browser tools.\n\n"
+            "Rules:\n"
+            "1. For simple factual questions answer directly from your own knowledge.\n"
+            "2. Use search/fetch/crawl/screenshot ONLY when you need current/external information.\n"
+            "3. After AT MOST 2-3 tool calls, STOP calling tools and produce a final answer.\n"
+            "4. If a tool returns empty or fails, say so honestly - do not retry with the same approach.\n"
+            "5. Keep the final answer concise and in the user's language."
+        )},
+        {"role": "user", "content": prompt},
+    ]
+
+    final = None
+    for it in range(args.max_iter):
+        log_msg(logf, "ITER", f"#{it+1} model={model}")
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=openai_tools,
+                tool_choice="auto",
+                max_tokens=args.max_tokens,
+                temperature=0.2,
+            )
+        except Exception as e:
+            log_msg(logf, "ERR", f"chat.completions failed: {e}")
+            final = f"[error: {e}]"
+            break
+
+        msg = resp.choices[0].message
+        # Dump reasoning_content to log if present (S5). For a
+        # research agent we don't want to burn output tokens on
+        # the model's thinking, but the operator may want to
+        # see it when debugging. Goes to log only.
+        rc = getattr(msg, "reasoning_content", None)
+        if rc:
+            log_msg(logf, "REASONING", f"len={len(rc)} preview='{rc[:200]}'")
+        log_msg(logf, "ASSISTANT",
+                f"content='{(msg.content or '')[:200]}' "
+                f"tool_calls={len(msg.tool_calls or [])}")
+
+        if not msg.tool_calls:
+            final = msg.content or ""
+            break
+
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg.tool_calls
+            ],
+        })
+
+        for tc in msg.tool_calls:
+            fn_name = tc.function.name
+            try:
+                fn_args = json.loads(tc.function.arguments or "{}")
+            except Exception:
+                fn_args = {}
+
+            log_msg(logf, "TOOL_CALL",
+                    f"{fn_name}({json.dumps(fn_args)[:200]})")
+            if fn_name not in tools_by_name:
+                tool_text = f"[unknown tool: {fn_name}]"
+                log_msg(logf, "WARN", f"unknown tool '{fn_name}'")
+            else:
+                sess, _ = tools_by_name[fn_name]
+                try:
+                    r = await sess.call_tool(fn_name, fn_args)
+                    tool_text = _tool_result_to_text(r.content, fn_name, logf)
+                    if r.isError:
+                        log_msg(logf, "TOOL_ERR",
+                                f"{fn_name} returned isError=True")
+                except Exception as e:
+                    tool_text = f"[tool error: {e}]"
+                    log_msg(logf, "ERR",
+                            f"{fn_name} call failed: {e}")
+
+            log_msg(logf, "TOOL_RESULT",
+                    f"{fn_name} -> len={len(tool_text)} "
+                    f"preview='{tool_text[:120]}'")
+
+            tool_text = _truncate_for_model(tool_text)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": tool_text,
+            })
+
+    if final is None:
+        final = "[max iterations reached without final answer]"
+
+    log_msg(logf, "FINAL", f"len={len(final)}")
+    if not args.no_save:
+        with open(args.out, "w") as f:
+            f.write(f"# Query\n\n{prompt}\n\n# Answer\n\n{final}\n")
+        log_msg(logf, "SAVE", args.out)
+    return final
+
 async def run_agent(args):
     # Resolve prompt from either source (R6 fix).
     prompt = args.prompt_str or " ".join(args.prompt_words) or ""
@@ -187,166 +349,17 @@ async def run_agent(args):
     # on exceptions (R5 fix). The previous code opened logf and
     # only closed it on the success path, leaking the FD on the
     # many failure paths between open and close.
+    # N1: exit_stack is hoisted above the with-block so aclose() in
+    # the finally clause runs even if the body raises. AsyncExitStack
+    # does NOT support `async with` directly; manual try/finally is
+    # the canonical pattern.
+    exit_stack = AsyncExitStack()
+    # R5: with-block closes the log FD on any exit path.
     with open(args.log, "a") as logf:
-        log_msg(logf, "START",
-                f"prompt='{prompt[:200]}' max_iter={args.max_iter} "
-                f"model={args.model}")
-
-        client = OpenAI(base_url=f"{args.llama_url}/v1",
-                        api_key="not-needed", timeout=args.timeout)
-        model = args.model
-        if model == "auto":
-            try:
-                ms = client.models.list(timeout=10)
-                model = ms.data[0].id
-            except Exception as e:
-                log_msg(logf, "ERR", f"models.list failed: {e}")
-                raise
-
-        # Connect to MCP servers (donsetch stdIO shim only).
-        sessions = []
-        exit_stack = AsyncExitStack()
-        # name -> (session, tool) for O(1) lookup AND duplicate-name
-        # detection (R8 + S4). The previous linear scan silently
-        # picked the first match if two servers registered the same
-        # tool name.
-        tools_by_name: dict[str, tuple[ClientSession, object]] = {}
-        for p in make_mcp_params():
-            try:
-                read, write = await exit_stack.enter_async_context(
-                    stdio_client(p))
-                sess = await exit_stack.enter_async_context(
-                    ClientSession(read, write))
-                await sess.initialize()
-                sessions.append(sess)
-                tools_resp = await sess.list_tools()
-                for t in tools_resp.tools:
-                    if t.name in tools_by_name:
-                        log_msg(logf, "ERR",
-                                f"tool '{t.name}' registered by TWO servers; "
-                                f"keeping the first")
-                        continue
-                    tools_by_name[t.name] = (sess, t)
-                log_msg(logf, "MCP",
-                        f"connected, {len(tools_resp.tools)} tools")
-            except Exception as e:
-                log_msg(logf, "ERR", f"MCP connect failed: {e}")
-
-        all_tools = list(tools_by_name.values())
-        openai_tools = [mcp_to_openai_tool(t) for _, t in all_tools]
-        log_msg(logf, "TOOLS",
-                f"{len(openai_tools)} tools exposed: "
-                f"{[t['function']['name'] for t in openai_tools]}")
-
-        messages = [
-            {"role": "system", "content": (
-                "You are a research assistant with web search and browser tools.\n\n"
-                "Rules:\n"
-                "1. For simple factual questions answer directly from your own knowledge.\n"
-                "2. Use search/fetch/crawl/screenshot ONLY when you need current/external information.\n"
-                "3. After AT MOST 2-3 tool calls, STOP calling tools and produce a final answer.\n"
-                "4. If a tool returns empty or fails, say so honestly - do not retry with the same approach.\n"
-                "5. Keep the final answer concise and in the user's language."
-            )},
-            {"role": "user", "content": prompt},
-        ]
-
-        final = None
-        for it in range(args.max_iter):
-            log_msg(logf, "ITER", f"#{it+1} model={model}")
-            try:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=openai_tools,
-                    tool_choice="auto",
-                    max_tokens=args.max_tokens,
-                    temperature=0.2,
-                )
-            except Exception as e:
-                log_msg(logf, "ERR", f"chat.completions failed: {e}")
-                final = f"[error: {e}]"
-                break
-
-            msg = resp.choices[0].message
-            # Dump reasoning_content to log if present (S5). For a
-            # research agent we don't want to burn output tokens on
-            # the model's thinking, but the operator may want to
-            # see it when debugging. Goes to log only.
-            rc = getattr(msg, "reasoning_content", None)
-            if rc:
-                log_msg(logf, "REASONING", f"len={len(rc)} preview='{rc[:200]}'")
-            log_msg(logf, "ASSISTANT",
-                    f"content='{(msg.content or '')[:200]}' "
-                    f"tool_calls={len(msg.tool_calls or [])}")
-
-            if not msg.tool_calls:
-                final = msg.content or ""
-                break
-
-            messages.append({
-                "role": "assistant",
-                "content": msg.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ],
-            })
-
-            for tc in msg.tool_calls:
-                fn_name = tc.function.name
-                try:
-                    fn_args = json.loads(tc.function.arguments or "{}")
-                except Exception:
-                    fn_args = {}
-
-                log_msg(logf, "TOOL_CALL",
-                        f"{fn_name}({json.dumps(fn_args)[:200]})")
-                if fn_name not in tools_by_name:
-                    tool_text = f"[unknown tool: {fn_name}]"
-                    log_msg(logf, "WARN", f"unknown tool '{fn_name}'")
-                else:
-                    sess, _ = tools_by_name[fn_name]
-                    try:
-                        r = await sess.call_tool(fn_name, fn_args)
-                        tool_text = _tool_result_to_text(r.content, fn_name, logf)
-                        if r.isError:
-                            log_msg(logf, "TOOL_ERR",
-                                    f"{fn_name} returned isError=True")
-                    except Exception as e:
-                        tool_text = f"[tool error: {e}]"
-                        log_msg(logf, "ERR",
-                                f"{fn_name} call failed: {e}")
-
-                log_msg(logf, "TOOL_RESULT",
-                        f"{fn_name} -> len={len(tool_text)} "
-                        f"preview='{tool_text[:120]}'")
-
-                tool_text = _truncate_for_model(tool_text)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": tool_text,
-                })
-
-        if final is None:
-            final = "[max iterations reached without final answer]"
-
-        log_msg(logf, "FINAL", f"len={len(final)}")
-        if not args.no_save:
-            with open(args.out, "w") as f:
-                f.write(f"# Query\n\n{prompt}\n\n# Answer\n\n{final}\n")
-            log_msg(logf, "SAVE", args.out)
-
-    await exit_stack.aclose()
-    return final
+        try:
+            return await _body(args, prompt, logf, exit_stack)
+        finally:
+            await exit_stack.aclose()
 
 
 def main():
