@@ -1,52 +1,112 @@
 #!/usr/bin/env python3
 """stdIO MCP proxy for donsetch HTTP MCP server.
 
-Llama.cpp only supports stdIO MCP servers via --mcp-servers-config.
-This script connects to donsetch-http:8765/mcp over HTTP (streamable)
-and exposes the same tools via stdIO for llama.cpp.
+Llama.cpp's --mcp-servers-config expects stdIO MCP servers.
+This script connects to donsetch-http:8765/mcp over HTTP
+(streamable) and re-exposes the same tools via stdIO for
+llama.cpp. The shim is a thin forwarder — every JSON-RPC
+method and every tool is passed through unchanged.
+
+Requires Python 3.10+ (uses `dict | None` and structural
+pattern matching).
 """
 import asyncio
 import json
-import sys
 import os
+import sys
+from typing import Any
+
 import httpx
 
-DONSETCH_URL = os.environ.get("DONSETCH_URL", "http://localhost:8765/mcp")
+DONSETCH_URL = os.environ.get("DONSETCH_URL", "http://127.0.0.1:8765/mcp")
+# Per-streamable-HTTP spec: a session-id is returned in the
+# Mcp-Session-Id header on the initialize response and must be
+# sent on every subsequent request. We capture and forward it.
+_session_id: str | None = None
 
-async def call_remote(method: str, params: dict | None = None, req_id: int = 1):
-    payload = {"jsonrpc": "2.0", "id": req_id, "method": method}
+
+async def call_remote(method: str, params: dict | None = None, req_id: int = 1) -> dict:
+    """POST a JSON-RPC request to the donsetch HTTP transport.
+
+    Returns the parsed JSON-RPC response dict (with either
+    `result` or `error`). MCP streamable-HTTP may reply with
+    server-sent events; in that case we extract the JSON event
+    payload (joined per the SSE spec for multi-line data fields).
+    """
+    payload: dict[str, Any] = {"jsonrpc": "2.0", "id": req_id, "method": method}
     if params is not None:
         payload["params"] = params
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    global _session_id
+    if _session_id is not None:
+        # Forward the session id on every request after initialize
+        # so the server can correlate the calls.
+        headers["Mcp-Session-Id"] = _session_id
+
     async with httpx.AsyncClient(timeout=120.0) as c:
-        r = await c.post(
-            DONSETCH_URL,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-        )
+        r = await c.post(DONSETCH_URL, json=payload, headers=headers)
+        # Capture the session id from the response if this is the
+        # first request. The server only sets it after a successful
+        # initialize; subsequent calls carry the value we already
+        # cached above.
+        sid = r.headers.get("Mcp-Session-Id")
+        if sid and not _session_id:
+            _session_id = sid
         r.raise_for_status()
-        # streamable-http may return SSE-formatted data; extract JSON
-        body = r.text.strip()
+        # Streamable-HTTP may return SSE-formatted body. A single
+        # SSE event can have multiple `data:` lines that must be
+        # joined with `\n` before JSON parsing. We split on blank
+        # lines (event boundaries), accumulate `data:` lines per
+        # event, and parse the first event that has any.
+        body = r.text
         if body.startswith("data:"):
-            for line in body.split("\n"):
-                if line.startswith("data:"):
-                    return json.loads(line[len("data:"):].strip())
+            for event_block in body.split("\n\n"):
+                data_lines = []
+                for line in event_block.split("\n"):
+                    if line.startswith("data:"):
+                        data_lines.append(line[len("data:"):].lstrip())
+                if data_lines:
+                    return json.loads("\n".join(data_lines))
+            # No data: lines anywhere in the SSE body — server-side
+            # protocol error. Fall through to plain-JSON parse.
         return json.loads(body)
 
-def emit(obj):
+
+def emit(obj: dict) -> None:
+    """Write one JSON-RPC message to stdout, newline-terminated."""
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
 
-async def main():
+
+async def stdin_reader() -> asyncio.StreamReader:
+    """Attach an asyncio StreamReader to sys.stdin.
+
+    Replaces the per-line run_in_executor pattern (which created
+    a new thread per readline and could leak threads on parent
+    close). connect_read_pipe is a single setup call; each read
+    is then just `await reader.readline()`.
+    """
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader(limit=2**20)  # 1 MiB per line cap
+    protocol = asyncio.StreamReaderProtocol(reader)
+    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+    return reader
+
+
+async def main() -> None:
+    reader = await stdin_reader()
     while True:
-        line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
-        if not line:
+        line = await reader.readline()
+        if not line:  # EOF — parent closed stdin
             return
         try:
-            req = json.loads(line.strip())
-        except Exception as e:
+            req = json.loads(line.decode("utf-8", errors="replace").strip())
+        except json.JSONDecodeError:
+            # Malformed request: don't crash, just skip. A well-
+            # behaved parent will close stdin if it gives up.
             continue
         method = req.get("method", "")
         params = req.get("params")
@@ -60,6 +120,9 @@ async def main():
             else:
                 emit({"jsonrpc": "2.0", "id": rid, "result": None})
         except Exception as e:
-            emit({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": str(e)}})
+            emit({"jsonrpc": "2.0", "id": rid,
+                  "error": {"code": -32000, "message": f"[shim] {type(e).__name__}: {e}"}})
 
-asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())

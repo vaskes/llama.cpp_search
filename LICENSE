@@ -1,0 +1,106 @@
+Source Code Available — No Grant of Rights
+
+Copyright (c) 2026 Kuduza Ai Lab
+https://kuduza.com
+
+> **Public visibility ≠ grant of rights.** This source code is
+> published in a public GitHub repository so that the operator
+> and their collaborators can read it. Publication does NOT
+> grant any license to run, copy, fork, modify, create
+> derivative works, or use the code (commercially or
+> non-commercially).
+
+1. Definitions
+
+  1.1 "Source" means the human-readable form of the software
+      in this repository, including all text files under
+      version control at the time of access.
+  1.2 "Code" means any portion of the Source, in any form
+      (compiled, transpiled, vendored, or otherwise).
+  1.3 "Use" means, jointly or severally: to run, copy, fork,
+      modify, create derivative works of, compile, link, embed,
+      distribute, sublicense, sell, or otherwise exploit the
+      Code for any purpose (including internal business
+      purposes, academic research, and personal projects).
+  1.4 "ML Training" means the process of adjusting the
+      parameters of a machine-learning model (including but not
+      limited to: pre-training, fine-tuning, RLHF, RLAIF,
+      instruction-tuning, LoRA, QLoRA, prefix-tuning,
+      adapter-tuning, embedding recomputation, knowledge
+      distillation, model merging) by exposing the model to
+      the Code or to data derived substantially from the Code.
+
+2. Reservation of rights
+
+  All rights, title, and interest in and to the Source and the
+  Code are reserved by the Copyright Holder. No rights are
+  granted by implication, estoppel, exhaustion, or otherwise
+  except as expressly stated in this License.
+
+3. Restrictions
+
+  Subject to the express permissions in Section 4, the
+  following acts are prohibited without the prior written
+  consent of the Copyright Holder:
+
+  3.1 Use of the Code for any purpose not expressly permitted
+      under Section 4.
+  3.2 Distribution, sublicensing, or sale of the Code, in
+      source or object form, alone or bundled with other
+      software.
+  3.3 Creation of derivative works based on the Code.
+  3.4 Use of the Code as input to, training data for, or
+      weight initialization for any ML Training process.
+
+4. Express permissions
+
+  The following are permitted without prior written consent:
+
+  4.1 Reading the Source in a public GitHub viewer for the
+      purpose of understanding what the software does.
+  4.2 Citing the Source in academic publications, blog
+      posts, or design reviews, with proper attribution to
+      the Copyright Holder and a link to the canonical
+      repository.
+  4.3 Submitting bug reports, feature requests, or
+      pull-requests upstream, subject to the Copyright
+      Holder's review and acceptance.
+
+5. Trademarks
+
+  Nothing in this License grants any right to use the trade
+  names, trademarks, service marks, or product names of the
+  Copyright Holder.
+
+6. Disclaimer
+
+  THE CODE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT
+  WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+  LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+  PARTICULAR PURPOSE, AND NON-INFRINGEMENT. THE COPYRIGHT
+  HOLDER SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+  OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+  OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE
+  CODE OR THE USE OR OTHER DEALINGS IN THE CODE.
+
+7. Governing law
+
+  This License is governed by the laws of the Russian
+  Federation, without regard to its conflict-of-laws rules.
+  Any dispute arising out of or in connection with this
+  License shall be subject to the exclusive jurisdiction of
+  the courts of the Russian Federation.
+
+8. Severability
+
+  If any provision of this License is held by a court of
+  competent jurisdiction to be invalid, illegal, or
+  unenforceable, the remaining provisions shall continue in
+  full force and effect.
+
+9. Entire agreement
+
+  This License constitutes the entire agreement between the
+  user and the Copyright Holder with respect to the Source
+  and the Code, and supersedes all prior or contemporaneous
+  understandings, written or oral, regarding the same.

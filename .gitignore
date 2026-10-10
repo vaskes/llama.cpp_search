@@ -4,7 +4,8 @@ __pycache__/
 .venv/
 venv/
 
-# Node
+# Node (kept from old SearXNG stack; only @playwright/mcp
+# remained and that's now gone too — file is a vestige)
 node_modules/
 npm-debug.log*
 
@@ -17,3 +18,8 @@ npm-debug.log*
 *.egg-info/
 dist/
 build/
+
+# Logs and agent output (S10)
+*.log
+logs/
+last_answer.md
