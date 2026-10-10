@@ -1,30 +1,11 @@
 {
-  "_comment": "MCP server definitions for llama.cpp --mcp-servers-config. Connects to donsetch (HTTP MCP stdIO proxy) for web search/fetch/crawl/screenshot. SearXNG support was REMOVED in Sep 2026 \u2014 engines CAPTCHA on RU datacenter IPs and result quality was unacceptable. See docs/MIGRATION-TO-DONSETCH.md.",
   "mcpServers": {
     "donsetch": {
-      "_comment": "stdIO proxy to donsetch-http (HTTP MCP). Connects to http://localhost:8765/mcp (or DONSETCH_URL env) and re-exposes 4 tools (web_search, web_fetch, web_crawl, web_screenshot) over stdIO for llama.cpp. See docs/DONSETCH.md.",
-      "command": "/opt/search/venv/bin/python",
-      "args": [
-        "/opt/search/src/mcp_donsetch_stdio.py"
-      ],
+      "command": "python3",
+      "args": ["/opt/llama.cpp_search/src/mcp_donsetch_stdio.py"],
       "env": {
         "DONSETCH_URL": "http://127.0.0.1:8765/mcp",
         "PATH": "/usr/bin:/bin"
-      }
-    },
-    "playwright": {
-      "command": "/opt/node20/bin/node",
-      "args": [
-        "/opt/search/node_modules/@playwright/mcp/cli.js",
-        "--headless",
-        "--isolated",
-        "--no-sandbox",
-        "--output-dir",
-        "/opt/search/logs/playwright"
-      ],
-      "env": {
-        "PATH": "/opt/node20/bin:/usr/bin:/bin",
-        "HOME": "/home/git"
       }
     }
   }

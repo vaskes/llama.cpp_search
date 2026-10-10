@@ -1,240 +1,82 @@
-# ⚠️ DEPRECATED
+# HUMAN_OPS — operator notes for the stdIO bridge
 
-> **Этот документ устарел.** Описанный в нём SearXNG-based стек больше не работает
-> (CAPTCHA на российских IP). Используйте [DONSETCH_DEPLOY.md](DONSETCH_DEPLOY.md) и
-> [QUICKSTART.md](QUICKSTART.md) вместо этого. Файл сохранён в git для истории проекта.
->
-> Ключевая замена:
-> - SearXNG container →  (Rust MCP + Playwright)
-> -  →  (уже в репо)
-> - 3 SearXNG tools → 4 donsetch tools (web_search, web_fetch, web_crawl, web_screenshot)
+This doc covers running the stdIO bridge (`mcp_donsetch_stdio.py`)
+and the upstream `donsetch-http` MCP server in production. The
+target host is the operator's `llmhost2`. Most sections assume
+docker compose v2 and Ubuntu 24.04.
 
----
+## What runs where
 
-# HUMAN_OPS — Runbook for llama.cpp_search
+| Process | Where | Started by |
+|---------|-------|------------|
+| `donsetch-http` | `/opt/hound`, container `donsetch-http` | docker compose (profile http) |
+| stdIO bridge | spawned by llama-server per request | `--mcp-servers-config` flag |
+| `llama-ornith.service` | systemd | operator (manual) |
+| Telegram bot | `/opt/telegram-bot` container | docker compose |
 
-Это runbook для **разворачивания** на новой машине или **диагностики** на текущей.
+## Restart cycle (in order)
 
-## Что здесь
+1. `cd /opt/hound && git pull && docker compose --profile http up -d`
+   — pulls newer donsetch, rebuilds image, restarts container.
+   Wait 5s, then `curl http://127.0.0.1:8765/health`.
+2. `sudo systemctl restart llama-ornith.service` — picks up the
+   new stdIO bridge if you changed the shim, otherwise no-op.
+3. `cd /opt/telegram-bot && sudo docker compose up -d --build` —
+   picks up bot changes.
 
-- [Hardware requirements](#hardware-requirements)
-- [Установка с нуля](#установка-с-нуля)
-- [Подключение MCP к твоему llama-server](#подключение-mcp-к-твоему-llama-server)
-- [Диагностика](#диагностика)
-- [Troubleshooting](#troubleshooting)
+## Why `Restart=on-failure` is dangerous here
 
-## Hardware requirements
+`Restart=on-failure` + `RestartSec=10` is a footgun for llama
+services: if one crashes, systemd loops the restart. With two
+`llama-*.service` units both configured that way, a single
+crash on port 8080 leads to two services fighting for the port
+and the loop never breaks.
 
-| Tier       | RAM    | GPU                | Models supported                          |
-| ---------- | ------ | ------------------ | ----------------------------------------- |
-| Minimum    | 16 GB  | none               | Qwen3-14B Q4, Qwen3-8B Q4                 |
-| Recommended| 32 GB  | none               | Qwen3-27B Q4, Ornith-35B Q4 (32K ctx)     |
-| Full       | 64+ GB | NVIDIA 24+ GB VRAM | Any model, full 512K context, fast        |
+**Recommendation:** `Restart=no` (or omit the line). Manual
+restart is fine for a single-user bot. If you really want
+auto-restart, use `Restart=on-success` with a long
+`RestartSec=600` (10 min) — the model is heavy to load and a
+restart loop is worse than a brief outage.
 
-> ⚠️ **Не запускай Ornith 35B Q8 на 512K context на машине с < 256 GB RAM.** OOM-kill.
+## Backup
 
-## Установка с нуля
+The repo is on GitHub (private). For local safety:
+- `git bundle create /opt/backups/llama.cpp_search.bundle --all`
+  before any risky `git filter-repo` or mass-rewrite pass.
+- `tar czf /opt/backups/llama.cpp_search.tar.gz /opt/llama.cpp_search`
+  captures uncommitted local edits (e.g. mcp-servers.json
+  override).
 
-### 1. Базовый софт
+Both go to the `/opt/mavis-backups` volume.
 
-```bash
-# Ubuntu 24.04
-sudo apt update && sudo apt install -y python3 python3-venv nodejs npm git docker.io
-
-# Node 20+ (Playwright MCP требует)
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-
-# Docker Compose v2 (включён в docker.io 24+)
-docker compose version
-```
-
-### 2. llama.cpp
-
-```bash
-git clone https://github.com/ggml-org/llama.cpp.git /opt/llama.cpp
-cd /opt/llama.cpp
-cmake -B build && cmake --build build --config Release -j
-```
-
-GGUF модели → `/opt/models/`.
-
-### 3. llama.cpp_search
+## Sanity checks
 
 ```bash
-git clone https://github.com/vaskes/llama.cpp_search.git /opt/search
-cd /opt/search
-python3 -m venv venv
-./venv/bin/pip install mcp openai httpx
-npm install @playwright/mcp
-```
-
-### 4. SearXNG
-
-```bash
-cd /opt/search/docker
-docker compose up -d
-sleep 10
-curl -s "http://localhost:8888/search?q=test&format=json" | head -c 200
-```
-
-Для автостарта после ребута:
-```bash
-sudo tee /etc/systemd/system/searxng-compose.service > /dev/null <<'EOF'
-[Unit]
-Description=SearXNG metasearch engine (docker compose)
-Requires=docker.service
-After=docker.service network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=true
-WorkingDirectory=/opt/search/docker
-ExecStartPre=-/usr/bin/docker compose down
-ExecStart=/usr/bin/docker compose up -d
-ExecStop=/usr/bin/docker compose down
-TimeoutStartSec=300
-
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo systemctl daemon-reload
-sudo systemctl enable --now searxng-compose.service
-```
-
-## Подключение MCP к твоему llama-server
-
-У тебя уже есть свой `llama-ornith.service` (или `llama-qwen38.service`, и т.д.). Чтобы добавить web search:
-
-```bash
-sudo systemctl edit llama-ornith.service
-```
-
-В открывшемся editor добавь (или в основной `[Service]` секции):
-
-```ini
-[Service]
-ExecStart=
-ExecStart=/opt/llama.cpp/build/bin/llama-server \
-  --model /opt/models/Ornith-1.5-35B-A3B-Q8_0.gguf \
-  --mmproj /opt/models/mmproj-Ornith-1.5-35B-A3B-bf16.gguf \
-  --jinja \
-  --agent \
-  --mcp-servers-config /opt/search/mcp-servers.json \
-  --port 8080 \
-  ...твои остальные флаги...
-```
-
-Ключевое: добавлены **только три** строчки:
-- `--jinja` (обязательно для tool calling)
-- `--agent` (включает MCP прокси)
-- `--mcp-servers-config /opt/search/mcp-servers.json` (подключает SearXNG + Playwright)
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart llama-ornith.service
-journalctl -u llama-ornith.service -n 20 | grep "MCP"
-#  srv  start: MCP warmup: 'searxng' discovered 3 tools
-#  srv  start: MCP warmup: 'playwright' discovered 24 tools
-#  srv  setup: Added 27 MCP tools
-```
-
-## Диагностика
-
-### Проверить что SearXNG работает
-
-```bash
-curl -s "http://localhost:8888/search?q=python&format=json" | jq '.results | length'
-# должно быть > 0
-```
-
-### Проверить что MCP подключены
-
-```bash
-curl -s http://localhost:8080/tools | jq 'length'
-# 27
-
-curl -s http://localhost:8080/tools | jq '.[] | .name' | head
-# "search"
-# "engines"
-# "fetch_url"
-# "browser_navigate"
-# ...
-```
-
-### Проверить tool calling работает
-
-```bash
-curl -s http://localhost:8080/v1/chat/completions \
+# 1. donsetch alive
+curl -sS http://127.0.0.1:8765/health
+# 2. donsetch MCP transport responsive
+curl -sS -X POST http://127.0.0.1:8765/mcp \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "Ornith-1.5-35B-A3B",
-    "messages": [{"role":"user","content":"What is the weather in Tokyo? Use the tool."}],
-    "tools": [{
-      "type":"function",
-      "function": {
-        "name":"get_weather",
-        "description":"Get current weather",
-        "parameters":{"type":"object","properties":{"city":{"type":"string"}}}
-      }
-    }],
-    "max_tokens": 500
-  }' | jq '.choices[0].message.tool_calls[0].function'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["result"]["tools"]))'
+# expect: 4
+# 3. stdIO shim still parses
+python3 -c 'import ast; ast.parse(open("/opt/llama.cpp_search/src/mcp_donsetch_stdio.py").read())'
+# 4. shim smoke test
+cd /opt/llama.cpp_search && python3 tests/test_shim_smoke.py
+# expect: Ran 5 tests in ... OK
 ```
 
-Должно вернуть что-то вроде:
-```json
-{
-  "name": "get_weather",
-  "arguments": "{\"city\":\"Tokyo\"}"
-}
-```
+## When to escalate
 
-## Troubleshooting
-
-### llama-server не поднимает MCP
-
-`journalctl -u llama-ornith` показывает `MCP warmup`?
-- **Нет** — флаг `--agent` забыт или модель не с `--jinja`
-- **Есть, но 0 tools** — `mcp-servers.json` неверный. Проверь синтаксис: `python3 -c "import json; print(json.load(open('/opt/search/mcp-servers.json')))"`
-
-### SearXNG возвращает 0 результатов
-
-API-движки должны работать всегда. Если 0:
-- `docker logs searxng | tail -20` — может быть network error
-- Проверь `curl "http://localhost:8888/engines"` — список активных движков
-
-### Playwright MCP отказывается стартовать
-
-- "Playwright requires Node.js 20" → установи Node 20+
-- Браузер не запускается → добавь `--no-sandbox` в args
-
-### `Restart=on-failure` лупит в loop
-
-См. `docs/RESTART_GOTCHA.md`. Если два llama-сервиса дерутся за 8080 — `Restart=Prevent` или `Restart=no`.
-
-### Tool call returns isError=True
-
-Смотри `agent.log` или journal llama-server. Обычно:
-- SearXNG вернул error → `curl "http://localhost:8888/..."` руками
-- Playwright не смог открыть URL → другая страница
-
-### model responds but ignores tools
-
-- Модель не поддерживает tool calling (нужна Qwen3, Llama-3.x, Mistral, и т.д.)
-- `--jinja` забыт → chat template не рендерит tools
-
-## Backup and recovery
-
-Всё что нужно для recovery:
-- `/opt/search/` — код
-- `/opt/llama.cpp/build/` — бинарь
-- `/opt/models/` — GGUF файлы
-- `/etc/systemd/system/llama-*.service` — твои юниты (НЕ перезаписывай чужие!)
-
-Переустановка на новой машине:
-```bash
-rsync -av /opt/search/ newhost:/opt/search/
-rsync -av /opt/models/ newhost:/opt/models/  # долго если большие
-# на новой машине: поставить llama.cpp + SearXNG + добавить --mcp-servers-config
-```
+- donsetch logs are full of `degraded: true` for a single
+  engine: that's one search engine blocking the operator's IP.
+  Add a different engine or change egress — don't wait for
+  every engine to fail.
+- shim smoke test fails on `test_03_web_search_real_query` with
+  timeout: the network is the bottleneck, not the shim. Check
+  the upstream `donsetch-http` container for the actual
+  network call stack.
+- llama-server logs are full of `MCP warmup: 0 tools`: the shim
+  crashed at startup. `sudo journalctl -u llama-ornith -n 50`
+  for the Python traceback.
