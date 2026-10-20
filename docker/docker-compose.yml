@@ -1,0 +1,49 @@
+name: llama-search
+
+services:
+  # DonSeTch HTTP MCP — web search, fetch, crawl, screenshot.
+  # Anti-bot tier-2 browser solves CAPTCHAs, then 6 engines aggregate results.
+  #
+  # The image is built from the dondai44423/donsetch upstream repo
+  # (pinned via DONSETCH_SRC below). Set DONSETCH_SRC to a local clone
+  # of that repo; the compose file only needs its Dockerfile.
+  #
+  # See docs/DONSETCH.md for full setup.
+  donsetch-http:
+    profiles: ["http"]
+    build:
+      # Point at a local clone of github.com/dondai44423/donsetch.
+      # Override with: DONSETCH_SRC=/path/to/donsetch docker compose ...
+      context: ${DONSETCH_SRC:-/opt/hound}
+      args:
+        INSTALL_CHROME: "true"
+    image: donsetch-mcp:latest
+    container_name: donsetch-http
+    environment:
+      DONSETCH_TRANSPORT: "http"
+      DONSETCH_HTTP_HOST: "0.0.0.0"
+      DONGHOST_NO_SANDBOX: "1"
+      NO_COLOR: "1"
+      # Full page content, not just snippets — otherwise web_fetch /
+      # web_crawl starve the LLM.
+      DONSETCH_MCP__TEXT_ONLY: "false"
+    ports:
+      - "127.0.0.1:${DONSETCH_PORT:-8765}:8765"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/8765"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    stop_grace_period: 45s
+    init: true
+    volumes:
+      - donsetch-cache:/home/donsetch/.cache/donsetch
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+volumes:
+  donsetch-cache:
