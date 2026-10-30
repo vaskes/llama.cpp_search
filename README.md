@@ -50,3 +50,16 @@ are the only thing that depends on llama.cpp's stdIO-MCP
 convention. When donsetch upstream ships a stdIO variant (or
 this whole thing moves into operator dotfiles), the repo can
 go private or be deleted.
+
+## Contributing
+
+No commit may credit a model as a co-author. GitHub counts a
+`Co-Authored-By:` trailer as a contribution, so a trailer that names a
+model puts the model on this repository's contributors list — a model
+that wrote none of it, holds no key and opened no pull request.
+
+The check is `tools/check_no_model_coauthor_trailers.py`; it runs on
+every push and every pull request, and it checks itself: a detector that
+cannot see a trailer any more reports green, which is worse than no
+detector at all.
+
